@@ -1,0 +1,17 @@
+What is inside bar? Wo buy candle jiski closing kisi previous candle k high k below ho. ya wo sell candle jiski closing prevous kisi candle k low k opar ho
+
+What is independent bar? Inverse of inside bar.
+
+Rules: (For uptrend case same inverse rules for down trend)
+1: Retracemnt rule: Uptrend mai after a BOS or CHOCH Valid retracement tab hi consider hogi jab kisi independent bar buy candle ka low break hoga, ais mai bhi agy aik retracement wick rule hai, means agr first time low break nhi hua aur wick lg gyi hai last independent bar k low k neechay tou phr us new low ka breakout as a retracement mana jy ga, agr price usko break kiye bagher opar nikal jati hai tou retracement consider nhi hogi.
+
+2: After a bullish BOS or CHOCH, previous high ya higher high and the breakout point ain k darmeyan lowest point confirm low hoga, market jb usko downside break kry gi tou opposite CHOCH hoga (trend reverse hoga).
+
+2: valid BOS CHOCH k liye bhi similar rule hai retracement rule ki trah. For example, aik previous higher high hai 4830 XAUUSD Gold, so price comes up and aik buy candle 4830 k opar wick bna daiti hai but uski body 4830 k neechay hi close krti hai, so now our previous higher high is changed, ab jo new wick lgi hai wo hmara higher high previous higher high ab invalid ho chuka hai. Ab agar price ais updated higher high ko break kry gi tou BOS consider hoga, same rule for bearish choch and bullish choch.
+
+3: bearish choch k bad retracement ka wait kia jy ga jb retracement a jy gi start ho jy gi tou price ne jo lower low bnaya hai, uske break down py brearish bos consider hoga, aur price agar usko break ni krti aur upside ja kr recent higher high ko break kr daiti hai tou aik bullsh choch form ho jy ga.
+
+Summary:
+- Previous highs, lows / HH, HL / LH, LL k across jb wick lgy tou high low change ho jaty hain.
+- Bullish structure tb tk bullish rhy ga jb price confirm low (most recent higher low break nhi krti) same for bearish.
+

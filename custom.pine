@@ -1,0 +1,291 @@
+//@version=6
+
+indicator("SK Market Structure", "SKMS", overlay=true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
+
+// Color scheme
+GREEN = #089981
+RED = #F23645
+
+// types and data structures
+
+// @type                            Trend bias states
+enum bias
+    BULLISH
+    BEARISH
+
+// @type                            UDT representing trend bias
+// @field bias                      BULLISH or BEARISH
+type trend
+    bias bias
+
+// @type                            UDT representing a pivot point (swing point) 
+// @field price                     current price level
+// @field barTime                   bar time
+// @field barIndex                  bar index    
+type pivot
+    float price
+    confirmed = false
+    int barIndex = bar_index
+
+// @type                            UDT representing the last independent bullish bar 
+// @field low                       low of independent bullish bar
+// @field barTime                   bar time
+// @field barIndex                  bar index    
+type LastIndependentBullishBar
+    float low
+    int barIndex = bar_index
+
+// @type                            UDT representing the last independent bearish bar 
+// @field high                      high of independent bullish bar
+// @field barTime                   bar time
+// @field barIndex                  bar index    
+type LastIndependentBearishBar
+    float high
+    int barIndex = bar_index
+
+// variables
+
+// @variable                        retracement started or not    
+var bool retracementStarted         = false
+
+// @variable                        the price which the on or more candles should break to start a retracement  
+var float retracementStartLevel     = na
+
+// @variable                        the last independent bullish bar
+var LastIndependentBullishBar lastIndependentBullishBar = na
+
+// @variable                        the last independent bullish bar
+var LastIndependentBearishBar lastIndependentBearishBar = na
+
+// @variable                        current swing pivot high    
+var pivot lastHigh                 = pivot.new(na, false, na)
+// @variable                        current swing pivot low
+var pivot lastLow                  = pivot.new(na, false, na)
+
+// @variable                        current swing pivot high    
+var pivot confirmHigh                 = pivot.new(na, false, na)
+// @variable                        current swing pivot low
+var pivot confirmLow                  = pivot.new(na, false, na)
+
+// @variable                        previous drawn line for BOS
+var line lastLine                     = na
+
+// @variable                        storage for BOS/CHOCH lines
+var array<line> structureLines        = array.new<line>()
+
+// @variable                        swing trend bias
+var trend swingTrend                = trend.new(bias.BULLISH)
+
+getLowestLow(int fromIndex, int toIndex) =>
+    float lowestLow = low
+    int lowestBarIndex = bar_index
+    for i = 0 to (toIndex - fromIndex)
+        int idx = bar_index - i
+        if idx >= fromIndex
+            if low[i] < lowestLow
+                lowestLow := low[i]
+                lowestBarIndex := idx    
+    [lowestLow, lowestBarIndex]
+
+getHighestHigh(int fromIndex, int toIndex) =>
+    float highestHigh = high
+    int highestBarIndex = bar_index
+    for i = 0 to (toIndex - fromIndex)
+        int idx = bar_index - i
+        if idx >= fromIndex
+            if high[i] > highestHigh
+                highestHigh := high[i]
+                highestBarIndex := idx    
+    [highestHigh, highestBarIndex]
+
+if barstate.isfirst
+
+    if close > open // if current candle is bullish
+
+        swingTrend.bias := bias.BULLISH
+        lastHigh := pivot.new(high)
+
+        retracementStarted := true
+
+    else // if current candle is bearish
+
+        swingTrend.bias := bias.BEARISH
+        lastLow := pivot.new(low)
+
+        retracementStarted := true
+else
+
+    // updating last high / last low
+    if swingTrend.bias == bias.BULLISH
+        if close > lastHigh.price and not lastHigh.confirmed
+            lastHigh := pivot.new(high)
+            lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+            retracementStartLevel := lastIndependentBullishBar.low
+            retracementStarted := false
+        else if high > lastHigh.price and close < lastHigh.price and lastHigh.confirmed
+            lastHigh.price := high
+        else if high > lastHigh.price and close < lastHigh.price and not lastHigh.confirmed
+            lastHigh := pivot.new(high)
+    else if swingTrend.bias == bias.BEARISH
+        if close < lastLow.price and not lastLow.confirmed
+            lastLow := pivot.new(low)
+            lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+            retracementStartLevel := lastIndependentBearishBar.high
+            retracementStarted := false
+        else if low < lastLow.price and close > lastLow.price and lastLow.confirmed
+            lastLow.price := low
+        else if low < lastLow.price and close > lastLow.price and not lastLow.confirmed
+            lastLow := pivot.new(low)
+
+    // updating confirm high / confirm low
+    if swingTrend.bias == bias.BULLISH
+        if not na(confirmLow.price) and low < confirmLow.price and close > confirmLow.price and confirmLow.confirmed
+            confirmLow.price := low
+        else if not na(confirmLow.price) and low < confirmLow.price and close > confirmLow.price and not confirmLow.confirmed
+            confirmLow := pivot.new(low)
+    else if swingTrend.bias == bias.BEARISH
+        if not na(confirmHigh.price) and high > confirmHigh.price and close < confirmHigh.price and confirmHigh.confirmed
+            confirmHigh.price := high
+        else if not na(confirmHigh.price) and high > confirmHigh.price and close < confirmHigh.price and not confirmHigh.confirmed
+            confirmHigh := pivot.new(high)
+
+    // handling confirm high / low break and updating trend direction
+    if swingTrend.bias == bias.BULLISH
+        // if price breaks below confirmLow, structure shifts to bearish
+        if close < confirmLow.price
+            swingTrend.bias := bias.BEARISH
+            confirmHigh := lastHigh
+            confirmHigh.confirmed := true
+            lastLow := confirmLow
+            confirmLow := pivot.new(na, false, na)
+            lastHigh := pivot.new(na, false, na)
+
+            // updating retracement vars
+            lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+            retracementStartLevel := lastIndependentBullishBar.low
+            retracementStarted := false
+    else if swingTrend.bias == bias.BEARISH
+        // if price breaks above confirmHigh, structure shifts to bullish
+        if close > confirmHigh.price
+            swingTrend.bias := bias.BULLISH
+            confirmLow := lastLow
+            confirmLow.confirmed := true
+            lastHigh  := confirmHigh
+            confirmHigh := pivot.new(na, false, na)
+            lastLow := pivot.new(na, false, na)
+
+            // updating retracement vars
+            lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+            retracementStartLevel := lastIndependentBearishBar.high
+            retracementStarted := false
+
+    // checking for retracement start
+    if not retracementStarted and not na(retracementStartLevel)
+
+        if swingTrend.bias == bias.BULLISH
+
+            if close < retracementStartLevel
+                retracementStarted := true
+                retracementStartLevel := na
+                lastHigh.confirmed := true
+            else if low < retracementStartLevel
+                retracementStartLevel := low
+
+        else if swingTrend.bias == bias.BEARISH
+
+            if close > retracementStartLevel
+                retracementStarted := true
+                retracementStartLevel := na
+                lastLow.confirmed := true
+            else if high > retracementStartLevel
+                retracementStartLevel := high
+
+    // detecting BOS / CHOCH
+    if retracementStarted
+
+        if swingTrend.bias == bias.BULLISH
+
+            // bearish CHOCH (breaks confirm low)
+            if not na(confirmLow.price) and close < confirmLow.price and confirmLow.confirmed
+
+                // drawing CHOCH
+                _line = line.new(x1=confirmLow.barIndex, y1=confirmLow.price, x2=bar_index, y2=confirmLow.price, color=RED, width=1)
+                structureLines.push(_line)
+                label.new(bar_index, confirmLow.price, "CHOCH", style=label.style_label_down, textcolor=color.red, color=color.new(color.white,100), size=size.small)
+
+                // changing trend
+                swingTrend.bias := bias.BEARISH
+                confirmHigh := lastHigh
+                confirmHigh.confirmed := true
+                lastLow := confirmLow
+                confirmLow := pivot.new(na, false, na)
+                lastHigh := pivot.new(na, false, na)
+
+                // resetting retracement
+                retracementStarted := false
+                retracementStartLevel := na
+                
+            // bullish BOS (breaks last high)
+            else if not na(lastHigh.price) and close > lastHigh.price and lastHigh.confirmed
+
+                _line = line.new(x1=lastHigh.barIndex, y1=lastHigh.price, x2=bar_index, y2=lastHigh.price, color=GREEN, width=1)
+                structureLines.push(_line)
+                int mid = math.round((bar_index + lastLow.barIndex) / 2)
+                label.new(mid, lastHigh.price, "BOS", style=label.style_label_down, textcolor=color.green, color=color.new(color.white,100), size=size.small)
+
+                // updating confirm low by getting the deepest low between lastHigh.barIndex and current barIndex
+                int fromIndex = lastHigh.barIndex
+                int toIndex = bar_index
+                [ll, llBar] = getLowestLow(fromIndex, toIndex)
+                confirmLow := pivot.new(ll, true, llBar)
+
+                lastHigh := pivot.new(high)
+                
+                retracementStarted := false
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+                retracementStartLevel := lastIndependentBullishBar.low
+
+        else if swingTrend.bias == bias.BEARISH
+            // bullish CHOCH (breaks confirm level - deeper break)
+            if not na(confirmHigh.price) and close > confirmHigh.price and confirmHigh.confirmed
+
+                // drawing CHOCH
+                _line = line.new(x1=confirmHigh.barIndex, y1=confirmHigh.price, x2=bar_index, y2=confirmHigh.price, color=GREEN, width=2)
+                structureLines.push(_line)
+                label.new(bar_index, confirmHigh.price, "CHOCH", style=label.style_label_down, textcolor=color.green, color=color.new(color.white,0), size=size.small)
+
+                // changing trend
+                swingTrend.bias := bias.BULLISH
+                confirmLow := lastLow
+                confirmLow.confirmed := true
+                lastHigh  := confirmHigh
+                confirmHigh := pivot.new(na, false, na)
+                lastLow := pivot.new(na, false, na)
+
+                // resetting retracement
+                retracementStarted := false
+                retracementStartLevel := na
+
+            // bearish BOS (breaks last low)
+            else if not na(lastLow.price) and close < lastLow.price and lastLow.confirmed
+
+                _line = line.new(x1=lastLow.barIndex, y1=lastLow.price, x2=bar_index, y2=lastLow.price, color=RED, width=1)
+                structureLines.push(_line)
+                int mid = math.round((bar_index + lastLow.barIndex) / 2)
+                label.new(mid, lastLow.price, "BOS", style=label.style_label_up, textcolor=color.red, color=color.new(color.white,100), size=size.small)
+
+                // updating confirm high by getting the highest high between lastLow.barIndex and current barIndex
+                int fromIndex = lastLow.barIndex
+                int toIndex = bar_index
+                [hh, hhBar] = getHighestHigh(fromIndex, toIndex)
+                confirmHigh := pivot.new(hh, true, hhBar)
+
+                lastLow := pivot.new(low)
+
+                retracementStarted := false
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+                retracementStartLevel := lastIndependentBearishBar.high
+
+// plotshape(retracementStarted, style=shape.circle, color=color.yellow)
+// plot(retracementStartLevel)
+                 
