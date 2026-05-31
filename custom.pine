@@ -5,6 +5,8 @@ indicator("SK Market Structure", "SKMS", overlay=true, max_labels_count = 500, m
 // Color scheme
 GREEN = #089981
 RED = #F23645
+LABEL_LINE_GAP = ta.atr(200) * 0.7
+LABEL_SIZE = size.normal
 
 // types and data structures
 
@@ -149,36 +151,6 @@ else
         else if not na(confirmHigh.price) and high > confirmHigh.price and close < confirmHigh.price and not confirmHigh.confirmed
             confirmHigh := pivot.new(high)
 
-    // handling confirm high / low break and updating trend direction
-    if swingTrend.bias == bias.BULLISH
-        // if price breaks below confirmLow, structure shifts to bearish
-        if close < confirmLow.price
-            swingTrend.bias := bias.BEARISH
-            confirmHigh := lastHigh
-            confirmHigh.confirmed := true
-            lastLow := confirmLow
-            confirmLow := pivot.new(na, false, na)
-            lastHigh := pivot.new(na, false, na)
-
-            // updating retracement vars
-            lastIndependentBullishBar := LastIndependentBullishBar.new(low)
-            retracementStartLevel := lastIndependentBullishBar.low
-            retracementStarted := false
-    else if swingTrend.bias == bias.BEARISH
-        // if price breaks above confirmHigh, structure shifts to bullish
-        if close > confirmHigh.price
-            swingTrend.bias := bias.BULLISH
-            confirmLow := lastLow
-            confirmLow.confirmed := true
-            lastHigh  := confirmHigh
-            confirmHigh := pivot.new(na, false, na)
-            lastLow := pivot.new(na, false, na)
-
-            // updating retracement vars
-            lastIndependentBearishBar := LastIndependentBearishBar.new(high)
-            retracementStartLevel := lastIndependentBearishBar.high
-            retracementStarted := false
-
     // checking for retracement start
     if not retracementStarted and not na(retracementStartLevel)
 
@@ -211,27 +183,31 @@ else
                 // drawing CHOCH
                 _line = line.new(x1=confirmLow.barIndex, y1=confirmLow.price, x2=bar_index, y2=confirmLow.price, color=RED, width=1)
                 structureLines.push(_line)
-                label.new(bar_index, confirmLow.price, "CHOCH", style=label.style_label_down, textcolor=color.red, color=color.new(color.white,100), size=size.small)
+                int mid = math.round((bar_index + confirmLow.barIndex) / 2)
+                label.new(mid, confirmLow.price - LABEL_LINE_GAP, "CHOCH", style= label.style_label_center, textcolor=RED, color=color.new(color.white,100), size=LABEL_SIZE)
 
-                // changing trend
+                // updating confirm high by getting the highest high between confirmLow.barIndex and current barIndex
+                int fromIndex = confirmLow.barIndex
+                int toIndex = bar_index
+                [hh, hhBar] = getHighestHigh(fromIndex, toIndex)
+                confirmHigh := pivot.new(hh, true, hhBar)
+
+                // changing trend and updating lastLow
                 swingTrend.bias := bias.BEARISH
-                confirmHigh := lastHigh
-                confirmHigh.confirmed := true
-                lastLow := confirmLow
-                confirmLow := pivot.new(na, false, na)
-                lastHigh := pivot.new(na, false, na)
+                lastLow := pivot.new(low)
 
                 // resetting retracement
                 retracementStarted := false
-                retracementStartLevel := na
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+                retracementStartLevel := lastIndependentBearishBar.high
                 
             // bullish BOS (breaks last high)
             else if not na(lastHigh.price) and close > lastHigh.price and lastHigh.confirmed
 
                 _line = line.new(x1=lastHigh.barIndex, y1=lastHigh.price, x2=bar_index, y2=lastHigh.price, color=GREEN, width=1)
                 structureLines.push(_line)
-                int mid = math.round((bar_index + lastLow.barIndex) / 2)
-                label.new(mid, lastHigh.price, "BOS", style=label.style_label_down, textcolor=color.green, color=color.new(color.white,100), size=size.small)
+                int mid = math.round((bar_index + lastHigh.barIndex) / 2)
+                label.new(mid, lastHigh.price + LABEL_LINE_GAP, "BOS", style= label.style_label_center, textcolor=GREEN, color=color.new(color.white,100), size=LABEL_SIZE)
 
                 // updating confirm low by getting the deepest low between lastHigh.barIndex and current barIndex
                 int fromIndex = lastHigh.barIndex
@@ -250,21 +226,25 @@ else
             if not na(confirmHigh.price) and close > confirmHigh.price and confirmHigh.confirmed
 
                 // drawing CHOCH
-                _line = line.new(x1=confirmHigh.barIndex, y1=confirmHigh.price, x2=bar_index, y2=confirmHigh.price, color=GREEN, width=2)
+                _line = line.new(x1=confirmHigh.barIndex, y1=confirmHigh.price, x2=bar_index, y2=confirmHigh.price, color=GREEN, width=1)
                 structureLines.push(_line)
-                label.new(bar_index, confirmHigh.price, "CHOCH", style=label.style_label_down, textcolor=color.green, color=color.new(color.white,0), size=size.small)
+                int mid = math.round((bar_index + confirmHigh.barIndex) / 2)
+                label.new(mid, confirmHigh.price + LABEL_LINE_GAP, "CHOCH", style= label.style_label_center, textcolor=GREEN, color=color.new(color.white,100), size=LABEL_SIZE)
 
-                // changing trend
+                // updating confirm low by getting the deepest low between confirmHigh.barIndex and current barIndex
+                int fromIndex = confirmHigh.barIndex
+                int toIndex = bar_index
+                [ll, llBar] = getLowestLow(fromIndex, toIndex)
+                confirmLow := pivot.new(ll, true, llBar)
+
+                // changing trend and updating lastHigh
                 swingTrend.bias := bias.BULLISH
-                confirmLow := lastLow
-                confirmLow.confirmed := true
-                lastHigh  := confirmHigh
-                confirmHigh := pivot.new(na, false, na)
-                lastLow := pivot.new(na, false, na)
+                lastHigh := pivot.new(high)
 
                 // resetting retracement
                 retracementStarted := false
-                retracementStartLevel := na
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+                retracementStartLevel := lastIndependentBullishBar.low
 
             // bearish BOS (breaks last low)
             else if not na(lastLow.price) and close < lastLow.price and lastLow.confirmed
@@ -272,7 +252,7 @@ else
                 _line = line.new(x1=lastLow.barIndex, y1=lastLow.price, x2=bar_index, y2=lastLow.price, color=RED, width=1)
                 structureLines.push(_line)
                 int mid = math.round((bar_index + lastLow.barIndex) / 2)
-                label.new(mid, lastLow.price, "BOS", style=label.style_label_up, textcolor=color.red, color=color.new(color.white,100), size=size.small)
+                label.new(mid, lastLow.price - LABEL_LINE_GAP, "BOS", style= label.style_label_center, textcolor=RED, color=color.new(color.white,100), size=LABEL_SIZE)
 
                 // updating confirm high by getting the highest high between lastLow.barIndex and current barIndex
                 int fromIndex = lastLow.barIndex
@@ -285,6 +265,37 @@ else
                 retracementStarted := false
                 lastIndependentBearishBar := LastIndependentBearishBar.new(high)
                 retracementStartLevel := lastIndependentBearishBar.high
+
+    else
+        // handling confirm high / low break and updating trend direction, if retracement has not started yet
+        if swingTrend.bias == bias.BULLISH
+            // if price breaks below confirmLow, structure shifts to bearish
+            if close < confirmLow.price
+                swingTrend.bias := bias.BEARISH
+                confirmHigh := lastHigh
+                confirmHigh.confirmed := true
+                lastLow := confirmLow
+                confirmLow := pivot.new(na, false, na)
+                lastHigh := pivot.new(na, false, na)
+
+                // updating retracement vars
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+                retracementStartLevel := lastIndependentBullishBar.low
+                retracementStarted := false
+        else if swingTrend.bias == bias.BEARISH
+            // if price breaks above confirmHigh, structure shifts to bullish
+            if close > confirmHigh.price
+                swingTrend.bias := bias.BULLISH
+                confirmLow := lastLow
+                confirmLow.confirmed := true
+                lastHigh  := confirmHigh
+                confirmHigh := pivot.new(na, false, na)
+                lastLow := pivot.new(na, false, na)
+
+                // updating retracement vars
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+                retracementStartLevel := lastIndependentBearishBar.high
+                retracementStarted := false
 
 // plotshape(retracementStarted, style=shape.circle, color=color.yellow)
 // plot(retracementStartLevel)
