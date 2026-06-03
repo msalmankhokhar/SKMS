@@ -106,13 +106,13 @@ if barstate.isfirst
 
         swingTrend.bias := bias.BULLISH
         lastHigh := pivot.new(high)
-        confirmLow := pivot.new(low)
+        confirmLow := pivot.new(low, true)
 
     else // if current candle is bearish
 
         swingTrend.bias := bias.BEARISH
         lastLow := pivot.new(low)
-        confirmHigh := pivot.new(high)
+        confirmHigh := pivot.new(high, true)
 
 else
 
