@@ -106,22 +106,27 @@ if barstate.isfirst
 
         swingTrend.bias := bias.BULLISH
         lastHigh := pivot.new(high)
-
-        retracementStarted := true
+        confirmLow := pivot.new(low)
 
     else // if current candle is bearish
 
         swingTrend.bias := bias.BEARISH
         lastLow := pivot.new(low)
+        confirmHigh := pivot.new(high)
 
-        retracementStarted := true
 else
 
     // updating last high / last low
+
+    previousBarClose = close[1]
+
     if swingTrend.bias == bias.BULLISH
         if close > lastHigh.price and not lastHigh.confirmed
             lastHigh := pivot.new(high)
-            lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+            if not (open != previousBarClose)
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+            else
+                lastIndependentBullishBar := LastIndependentBullishBar.new(previousBarClose)
             retracementStartLevel := lastIndependentBullishBar.low
             retracementStarted := false
         else if high > lastHigh.price and close < lastHigh.price and lastHigh.confirmed
@@ -131,7 +136,10 @@ else
     else if swingTrend.bias == bias.BEARISH
         if close < lastLow.price and not lastLow.confirmed
             lastLow := pivot.new(low)
-            lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+            if not (open != previousBarClose)
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+            else
+                lastIndependentBearishBar := LastIndependentBearishBar.new(previousBarClose)
             retracementStartLevel := lastIndependentBearishBar.high
             retracementStarted := false
         else if low < lastLow.price and close > lastLow.price and lastLow.confirmed
