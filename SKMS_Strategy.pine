@@ -1,0 +1,517 @@
+//@version=6
+strategy("SK Market Structure Strategy", "SKMS-S", overlay=true, 
+         max_labels_count=500, max_lines_count=500, max_boxes_count=500,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=1)
+
+// ─── Color Scheme ───────────────────────────────────────────────────────────
+GREEN          = #089981
+RED            = #F23645
+LABEL_SIZE     = size.normal
+LABEL_LINE_GAP = ta.atr(200) * 0.7
+
+// ─── Enums & Types ──────────────────────────────────────────────────────────
+enum bias
+    BULLISH
+    BEARISH
+
+type trend
+    bias bias
+
+type pivot
+    float price
+    confirmed = false
+    int barIndex = bar_index
+
+type LastIndependentBullishBar
+    float low
+    int barIndex = bar_index
+
+type LastIndependentBearishBar
+    float high
+    int barIndex = bar_index
+
+// ─── Indicator Variables ─────────────────────────────────────────────────────
+var bool  retracementStarted          = false
+var float retracementStartLevel       = na
+var LastIndependentBullishBar lastIndependentBullishBar = na
+var LastIndependentBearishBar lastIndependentBearishBar = na
+var pivot lastHigh                    = pivot.new(na, false, na)
+var pivot lastLow                     = pivot.new(na, false, na)
+var pivot confirmHigh                 = pivot.new(na, false, na)
+var pivot confirmLow                  = pivot.new(na, false, na)
+var trend swingTrend                  = trend.new(bias.BULLISH)
+var array<line> structureLines        = array.new<line>()
+
+// ─── Strategy State Variables ─────────────────────────────────────────────────
+var bool  bearishChochActive = false
+var bool  bullishChochActive = false
+var is_boc_nearto_sweep = false
+var float boc_high           = na
+var float boc_low            = na
+var float choch_level        = na
+var float sl_level           = na
+var float tp_level           = na
+var bool  boc_valid          = false
+var bool  entry_armed        = false
+var float tracked_boc_high   = na
+var float tracked_boc_low    = na
+var float absolute_sl_point  = na
+var float sl_buffer           = 1.0
+
+var independentbars_after_boc = 0
+var independentbars_after_boc_allowed = 1
+
+// ─── Helper Functions ─────────────────────────────────────────────────────────
+getLowestLow(int fromIndex, int toIndex) =>
+    float lowestLow    = low
+    int lowestBarIndex = bar_index
+    for i = 0 to (toIndex - fromIndex)
+        int idx = bar_index - i
+        if idx >= fromIndex
+            if low[i] < lowestLow
+                lowestLow      := low[i]
+                lowestBarIndex := idx
+    [lowestLow, lowestBarIndex]
+
+getHighestHigh(int fromIndex, int toIndex) =>
+    float highestHigh    = high
+    int highestBarIndex  = bar_index
+    for i = 0 to (toIndex - fromIndex)
+        int idx = bar_index - i
+        if idx >= fromIndex
+            if high[i] > highestHigh
+                highestHigh    := high[i]
+                highestBarIndex := idx
+    [highestHigh, highestBarIndex]
+
+// ─── Breakout Candle Validation ───────────────────────────────────────────────
+// Bearish CHOCH → Buy setup: check lower wick & body below choch
+validateBearishChoch(float _open, float _close, float _high, float _low, float _choch) =>
+    float body        = math.abs(_close - _open)
+    float lower_wick  = math.min(_open, _close) - _low
+    bool  cond1       = body > 0 and lower_wick >= body * 0.15
+    float body_bottom = math.min(_open, _close)
+    float below_choch = math.max(0.0, _choch - body_bottom)
+    float pct_below   = body > 0 ? below_choch / body : 1.0
+    bool  cond2       = pct_below < 0.75
+    cond1 and cond2
+
+// Bullish CHOCH → Sell setup: check upper wick & body above choch
+validateBullishChoch(float _open, float _close, float _high, float _low, float _choch) =>
+    float body        = math.abs(_close - _open)
+    float upper_wick  = _high - math.max(_open, _close)
+    bool  cond1       = body > 0 and upper_wick >= body * 0.15
+    float body_top    = math.max(_open, _close)
+    float above_choch = math.max(0.0, body_top - _choch)
+    float pct_above   = body > 0 ? above_choch / body : 1.0
+    bool  cond2       = pct_above < 0.75
+    cond1 and cond2
+
+checkIsBocNeartoSweep(float breakoutLevel, float _open, float _close) =>
+    candle_body_size = math.abs(_open - _close)
+    body_across_breakout = math.abs(_close - breakoutLevel)
+    body_across_breakout <= candle_body_size * 0.01
+
+checkIsValidNextIBAfterBOC(float breakoutLevel, float _open, float _close, ratio=0.4) =>
+    candle_body_size = math.abs(_open - _close)
+    body_across_breakout = math.abs(_close - breakoutLevel)
+    body_across_breakout <= candle_body_size * ratio
+
+checkIsSignificantBreakout(float breakoutLevel, float c_high, float c_low, float c_open, float c_close) =>
+    candle_size = math.abs(c_high - c_low)
+    body_across_breakout = math.abs(c_close - breakoutLevel)
+    body_across_breakout >= candle_size * 0.1
+
+checkIsMomentumCandle(float c_high, float c_low, float c_open, float c_close, wick_percent = 0.35) =>
+    isbullish = c_close > c_open
+    isbearish = c_open > c_close
+    candle_size = math.abs(c_high - c_low)
+    candle_wick = isbullish ? c_high - c_close : c_close - c_low
+    
+    candle_wick <= candle_size * wick_percent
+
+// Return stop-loss buffer; extracted to ensure consistent call on each calculation
+getSlBuffer() =>
+    ta.atr(5) * 0.5
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INDICATOR LOGIC (original, untouched)
+// ════════════════════════════════════════════════════════════════════════════
+if barstate.isfirst
+    if close > open
+        swingTrend.bias := bias.BULLISH
+        lastHigh        := pivot.new(high)
+        confirmLow      := pivot.new(low, true)
+    else
+        swingTrend.bias := bias.BEARISH
+        lastLow         := pivot.new(low)
+        confirmHigh     := pivot.new(high, true)
+else
+
+    previousBarClose = close[1]
+    // ── Update last high / last low ──────────────────────────────────────────
+    if swingTrend.bias == bias.BULLISH
+        if close > lastHigh.price and not lastHigh.confirmed
+            lastHigh := pivot.new(high)
+            if not (open != previousBarClose)
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+            else
+                lastIndependentBullishBar := LastIndependentBullishBar.new(previousBarClose)
+            retracementStartLevel := lastIndependentBullishBar.low
+            retracementStarted    := false
+        else if high > lastHigh.price and close < lastHigh.price and lastHigh.confirmed
+            lastHigh.price := high
+        else if high > lastHigh.price and close < lastHigh.price and not lastHigh.confirmed
+            lastHigh := pivot.new(high)
+    else if swingTrend.bias == bias.BEARISH
+        if close < lastLow.price and not lastLow.confirmed
+            lastLow := pivot.new(low)
+            if not (open != previousBarClose)
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+            else
+                lastIndependentBearishBar := LastIndependentBearishBar.new(previousBarClose)
+            retracementStartLevel := lastIndependentBearishBar.high
+            retracementStarted    := false
+        else if low < lastLow.price and close > lastLow.price and lastLow.confirmed
+            lastLow.price := low
+        else if low < lastLow.price and close > lastLow.price and not lastLow.confirmed
+            lastLow := pivot.new(low)
+
+    // ── Update confirm high / confirm low ────────────────────────────────────
+    if swingTrend.bias == bias.BULLISH
+        if not na(confirmLow.price) and low < confirmLow.price and close > confirmLow.price and confirmLow.confirmed
+            confirmLow.price := low
+        else if not na(confirmLow.price) and low < confirmLow.price and close > confirmLow.price and not confirmLow.confirmed
+            confirmLow := pivot.new(low)
+    else if swingTrend.bias == bias.BEARISH
+        if not na(confirmHigh.price) and high > confirmHigh.price and close < confirmHigh.price and confirmHigh.confirmed
+            confirmHigh.price := high
+        else if not na(confirmHigh.price) and high > confirmHigh.price and close < confirmHigh.price and not confirmHigh.confirmed
+            confirmHigh := pivot.new(high)
+
+    // ── Retracement start check ──────────────────────────────────────────────
+    if not retracementStarted and not na(retracementStartLevel)
+        if swingTrend.bias == bias.BULLISH
+            if close < retracementStartLevel
+                retracementStarted    := true
+                retracementStartLevel := na
+                lastHigh.confirmed    := true
+            else if low < retracementStartLevel
+                retracementStartLevel := low
+        else if swingTrend.bias == bias.BEARISH
+            if close > retracementStartLevel
+                retracementStarted    := true
+                retracementStartLevel := na
+                lastLow.confirmed     := true
+            else if high > retracementStartLevel
+                retracementStartLevel := high
+
+    // ── BOS / CHOCH Detection ────────────────────────────────────────────────
+    if retracementStarted
+
+        if swingTrend.bias == bias.BULLISH
+
+            // ── BEARISH CHOCH ── buy setup
+            if not na(confirmLow.price) and close < confirmLow.price and confirmLow.confirmed
+
+                _line = line.new(x1=confirmLow.barIndex, y1=confirmLow.price, x2=bar_index, y2=confirmLow.price, color=RED, width=1)
+                structureLines.push(_line)
+                int mid = math.round((bar_index + confirmLow.barIndex) / 2)
+                label.new(mid, confirmLow.price - LABEL_LINE_GAP, "CHOCH", style=label.style_label_center, textcolor=RED, color=color.new(color.white, 100), size=LABEL_SIZE)
+
+                int fromIndex = confirmLow.barIndex
+                int toIndex   = bar_index
+                [hh, hhBar]   = getHighestHigh(fromIndex, toIndex)
+                confirmHigh   := pivot.new(hh, true, hhBar)
+
+                // Activate buy setup (only if no trade/setup active)
+                if not bearishChochActive and not bullishChochActive and strategy.position_size == 0
+                    bearishChochActive := true
+                    bullishChochActive := false
+                    choch_level        := confirmLow.price
+                    tp_level           := confirmHigh.price
+                    boc_high           := high
+                    boc_low            := low
+                    tracked_boc_high   := high
+                    tracked_boc_low    := low
+                    absolute_sl_point  := low
+                    boc_valid          := validateBearishChoch(open, close, high, low, choch_level)
+
+                    is_boc_nearto_sweep := checkIsBocNeartoSweep(choch_level, open, close)
+
+                swingTrend.bias           := bias.BEARISH
+                lastLow                   := pivot.new(low)
+                retracementStarted        := false
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+                retracementStartLevel     := lastIndependentBearishBar.high
+
+            // BULLISH BOS
+            else if not na(lastHigh.price) and close > lastHigh.price and lastHigh.confirmed
+
+                // if bearishChochActive
+                //     bearishChochActive := false
+                //     boc_valid          := false
+                //     entry_armed        := false
+                //     boc_high           := na
+                //     boc_low            := na
+                //     tracked_high       := na
+                //     running_low        := na
+                //     choch_level        := na
+                //     tp_level           := na
+
+                _line = line.new(x1=lastHigh.barIndex, y1=lastHigh.price, x2=bar_index, y2=lastHigh.price, color=GREEN, width=1)
+                structureLines.push(_line)
+                int mid = math.round((bar_index + lastHigh.barIndex) / 2)
+                label.new(mid, lastHigh.price + LABEL_LINE_GAP, "BOS", style=label.style_label_center, textcolor=GREEN, color=color.new(color.white, 100), size=LABEL_SIZE)
+
+                int fromIndex = lastHigh.barIndex
+                int toIndex   = bar_index
+                [ll, llBar]   = getLowestLow(fromIndex, toIndex)
+                confirmLow    := pivot.new(ll, true, llBar)
+                lastHigh      := pivot.new(high)
+                retracementStarted        := false
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+                retracementStartLevel     := lastIndependentBullishBar.low
+
+        else if swingTrend.bias == bias.BEARISH
+
+            // ── BULLISH CHOCH ── sell setup
+            if not na(confirmHigh.price) and close > confirmHigh.price and confirmHigh.confirmed
+
+                _line = line.new(x1=confirmHigh.barIndex, y1=confirmHigh.price, x2=bar_index, y2=confirmHigh.price, color=GREEN, width=1)
+                structureLines.push(_line)
+                int mid = math.round((bar_index + confirmHigh.barIndex) / 2)
+                label.new(mid, confirmHigh.price + LABEL_LINE_GAP, "CHOCH", style=label.style_label_center, textcolor=GREEN, color=color.new(color.white, 100), size=LABEL_SIZE)
+
+                int fromIndex = confirmHigh.barIndex
+                int toIndex   = bar_index
+                [ll, llBar]   = getLowestLow(fromIndex, toIndex)
+                confirmLow    := pivot.new(ll, true, llBar)
+
+                // Activate sell setup (only if no trade/setup active)
+                if not bullishChochActive and not bearishChochActive and strategy.position_size == 0
+                    bullishChochActive := true
+                    bearishChochActive := false
+                    choch_level        := confirmHigh.price
+                    tp_level           := confirmLow.price
+                    boc_high           := high
+                    boc_low            := low
+                    tracked_boc_high   := high
+                    tracked_boc_low    := low
+                    absolute_sl_point  := high
+                    boc_valid          := validateBullishChoch(open, close, high, low, choch_level)
+
+                    is_boc_nearto_sweep := checkIsBocNeartoSweep(choch_level, open, close)
+
+                swingTrend.bias           := bias.BULLISH
+                lastHigh                  := pivot.new(high)
+                retracementStarted        := false
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+                retracementStartLevel     := lastIndependentBullishBar.low
+
+            // ── BEARISH BOS ── cancel any sell setup
+            else if not na(lastLow.price) and close < lastLow.price and lastLow.confirmed
+
+                // if bullishChochActive
+                //     bullishChochActive := false
+                //     boc_valid          := false
+                //     entry_armed        := false
+                //     boc_low            := na
+                //     boc_high           := na
+                //     tracked_low        := na
+                //     running_high       := na
+                //     choch_level        := na
+                //     tp_level           := na
+
+                _line = line.new(x1=lastLow.barIndex, y1=lastLow.price, x2=bar_index, y2=lastLow.price, color=RED, width=1)
+                structureLines.push(_line)
+                int mid = math.round((bar_index + lastLow.barIndex) / 2)
+                label.new(mid, lastLow.price - LABEL_LINE_GAP, "BOS", style=label.style_label_center, textcolor=RED, color=color.new(color.white, 100), size=LABEL_SIZE)
+
+                int fromIndex = lastLow.barIndex
+                int toIndex   = bar_index
+                [hh, hhBar]   = getHighestHigh(fromIndex, toIndex)
+                confirmHigh   := pivot.new(hh, true, hhBar)
+                lastLow       := pivot.new(low)
+                retracementStarted        := false
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+                retracementStartLevel     := lastIndependentBearishBar.high
+
+    else
+        // ── No retracement: handle direct confirmHigh/Low breaks ─────────────
+        if swingTrend.bias == bias.BULLISH
+            if close < confirmLow.price
+
+                // cancel buy setup if active
+                // if bearishChochActive
+                //     bearishChochActive := false
+                //     boc_valid          := false
+                //     entry_armed        := false
+                //     boc_high           := na
+                //     boc_low            := na
+                //     tracked_high       := na
+                //     running_low        := na
+                //     choch_level        := na
+                //     tp_level           := na
+
+                swingTrend.bias       := bias.BEARISH
+                confirmHigh           := lastHigh
+                confirmHigh.confirmed := true
+                lastLow               := confirmLow
+                confirmLow            := pivot.new(na, false, na)
+                lastHigh              := pivot.new(na, false, na)
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+                retracementStartLevel     := lastIndependentBullishBar.low
+                retracementStarted        := false
+
+        else if swingTrend.bias == bias.BEARISH
+            if close > confirmHigh.price
+
+                // cancel sell setup if active
+                // if bullishChochActive
+                //     bullishChochActive := false
+                //     boc_valid          := false
+                //     entry_armed        := false
+                //     boc_low            := na
+                //     boc_high           := na
+                //     tracked_low        := na
+                //     running_high       := na
+                //     choch_level        := na
+                //     tp_level           := na
+
+                swingTrend.bias       := bias.BULLISH
+                confirmLow            := lastLow
+                confirmLow.confirmed  := true
+                lastHigh              := confirmHigh
+                confirmHigh           := pivot.new(na, false, na)
+                lastLow               := pivot.new(na, false, na)
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+                retracementStartLevel     := lastIndependentBearishBar.high
+                retracementStarted        := false
+
+// ════════════════════════════════════════════════════════════════════════════
+//  STRATEGY EXECUTION
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── BUY SETUP (after Bearish CHOCH) ─────────────────────────────────────────
+isbullishCandle = close > open
+isbearishCandle = close < open
+if bearishChochActive and strategy.position_size == 0
+
+    // Cond3: if breakout candle low is broken → cancel setup
+    if close < tracked_boc_low and open > tracked_boc_low
+
+        independentbars_after_boc += 1
+            
+        if independentbars_after_boc > (is_boc_nearto_sweep ? independentbars_after_boc_allowed + 1 : independentbars_after_boc_allowed) or (not is_boc_nearto_sweep and not checkIsValidNextIBAfterBOC(tracked_boc_low, open, close) and independentbars_after_boc == 1) or (checkIsMomentumCandle(high, low, open, close))
+            // cancel setup
+            bearishChochActive := false
+            boc_valid          := false
+            boc_high           := na
+            boc_low            := na
+            tracked_boc_low    := na
+            tracked_boc_high   := na
+            choch_level        := na
+            tp_level           := na
+            absolute_sl_point  := na
+            sl_level  := na
+            is_boc_nearto_sweep := false
+            independentbars_after_boc := 0
+        else
+            tracked_boc_low := low
+            absolute_sl_point := low
+            if is_boc_nearto_sweep and independentbars_after_boc == 1
+                tracked_boc_high := high
+
+    else
+        if low < tracked_boc_low and close > tracked_boc_low
+            tracked_boc_low := low
+            absolute_sl_point := low
+
+        // Entry: candle closes above tracked_high
+        if close > tracked_boc_high and high > tracked_boc_high
+
+            if checkIsMomentumCandle(high, low, open, close, 0.3) and checkIsSignificantBreakout(tracked_boc_high, high, low, open, close) and isbullishCandle
+
+                float sl = absolute_sl_point - 1.0
+                strategy.entry("Buy", strategy.long, comment="BUY @ CHOCH")
+                strategy.exit("Buy Exit", "Buy", stop=sl, limit=tp_level)
+
+                bearishChochActive := false
+                boc_valid          := false
+                boc_high           := na
+                boc_low            := na
+                tracked_boc_low    := na
+                tracked_boc_high   := na
+                choch_level        := na
+                tp_level           := na
+                absolute_sl_point  := na
+                sl_level  := na
+                is_boc_nearto_sweep := false
+                independentbars_after_boc := 0
+            else
+                tracked_boc_high := high
+
+        else if high > tracked_boc_high and close < tracked_boc_high
+            tracked_boc_high := high
+
+
+
+// ── SELL SETUP (after Bullish CHOCH) ────────────────────────────────────────
+if bullishChochActive and strategy.position_size == 0
+
+    // Cond3: if breakout candle high is broken → cancel setup
+    if close > tracked_boc_high and open < tracked_boc_high
+
+        independentbars_after_boc += 1
+
+        if independentbars_after_boc > (is_boc_nearto_sweep ? independentbars_after_boc_allowed + 1 : independentbars_after_boc_allowed)  or (not is_boc_nearto_sweep and not checkIsValidNextIBAfterBOC(choch_level, open, close) and independentbars_after_boc == 0) or (checkIsMomentumCandle(high, low, open, close, 0.2))
+            bullishChochActive := false
+            boc_valid          := false
+            boc_high           := na
+            boc_low            := na
+            tracked_boc_low    := na
+            tracked_boc_high   := na
+            choch_level        := na
+            tp_level           := na
+            absolute_sl_point  := na
+            sl_level  := na
+            is_boc_nearto_sweep := false
+            independentbars_after_boc := 0
+        else
+            tracked_boc_high := high
+            absolute_sl_point := high
+            if is_boc_nearto_sweep and independentbars_after_boc == 1
+                tracked_boc_high := high
+
+    else
+        if high > tracked_boc_high and close < tracked_boc_high
+            tracked_boc_high := high
+            absolute_sl_point := high
+
+        // Entry: candle closes below tracked_low
+        if close < tracked_boc_low and low < tracked_boc_low
+
+            if checkIsMomentumCandle(high, low, open, close, 0.38) and checkIsSignificantBreakout(tracked_boc_low, high, low, open, close) and isbearishCandle
+
+                float sl = absolute_sl_point + 1.0
+                strategy.entry("Sell", strategy.short, comment="SELL @ CHOCH")
+                strategy.exit("Sell Exit", "Sell", stop=sl, limit=tp_level)
+
+                bullishChochActive := false
+                boc_valid          := false
+                boc_high           := na
+                boc_low            := na
+                tracked_boc_low    := na
+                tracked_boc_high   := na
+                choch_level        := na
+                tp_level           := na
+                absolute_sl_point  := na
+                sl_level  := na
+                is_boc_nearto_sweep := false
+                independentbars_after_boc := 0
+            else
+                tracked_boc_low := low
+
+        else if low < tracked_boc_low and close > tracked_boc_low
+            tracked_boc_low := low
