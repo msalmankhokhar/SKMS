@@ -6,12 +6,18 @@ indicator("SK Market Structure", "SKMS", overlay=true, max_labels_count = 500, m
 GREEN = #089981
 RED   = #F23645
 BLUE  = #368ef2
+GRAY =  #808080
 LABEL_LINE_GAP = ta.atr(200) * 0.7
 LABEL_SIZE     = size.normal
+
+CONFIRM_LINE_COLOR = BLUE
+LAST_LINE_COLOR = GRAY
+HIGH_LOW_LINE_WIDTH = 1
 
 // ─── Inputs ──────────────────────────────────────────────────────
 showInternalStructure = input.bool(false, "Show Internal Structure")
 iStructureStartPoint  = input.string("Last IB", "Internal Structure Start Point", options=["Breakout Candle", "Last IB"])
+highLowLineWidth = input.int(HIGH_LOW_LINE_WIDTH, "High/Low Line Width", minval=1, maxval=5)
 
 // ─── Types ───────────────────────────────────────────────────────
 enum bias
@@ -75,6 +81,8 @@ var pivot confirmLow               = pivot.new(na, false, na)
 var line  lastLine                 = na
 var array<line> structureLines     = array.new<line>()
 var line  confirmLow_line          = na
+var line  lastHigh_line         = na
+var line  lastLow_line          = na
 var line  confirmHigh_line         = na
 var int   highLowLineHorzOffset    = 30
 var trend swingTrend               = trend.new(bias.BULLISH)
@@ -119,6 +127,10 @@ else
         confirmLow_line.set_x2(bar_index + highLowLineHorzOffset)
     if not na(confirmHigh_line)
         confirmHigh_line.set_x2(bar_index + highLowLineHorzOffset)
+    if not na(lastHigh_line)
+        lastHigh_line.set_x2(bar_index + highLowLineHorzOffset)
+    if not na(lastLow_line)
+        lastLow_line.set_x2(bar_index + highLowLineHorzOffset)
 
     previousBarClose = close[1]
 
@@ -138,8 +150,11 @@ else
             if iPendingLastIB and iLastIBBias == bias.BULLISH
                 iLastIBLevel := lastIndependentBullishBar.low
                 iLastIBBar   := bar_index
+        // lastHigh sweep and update
         else if high > lastHigh.price and close < lastHigh.price and lastHigh.confirmed
             lastHigh.price := high
+            lastHigh_line.set_y1(lastHigh.price)
+            lastHigh_line.set_y2(lastHigh.price)
         else if high > lastHigh.price and close < lastHigh.price and not lastHigh.confirmed
             lastHigh := pivot.new(high)
     else if swingTrend.bias == bias.BEARISH
@@ -155,13 +170,17 @@ else
             if iPendingLastIB and iLastIBBias == bias.BEARISH
                 iLastIBLevel := lastIndependentBearishBar.high
                 iLastIBBar   := bar_index
+        // lastLow sweep and update
         else if low < lastLow.price and close > lastLow.price and lastLow.confirmed
             lastLow.price := low
+            lastLow_line.set_y1(lastLow.price)
+            lastLow_line.set_y2(lastLow.price)
         else if low < lastLow.price and close > lastLow.price and not lastLow.confirmed
             lastLow := pivot.new(low)
 
     // ── EXTERNAL: update confirm high / confirm low ─────────────
     if swingTrend.bias == bias.BULLISH
+        // confirmLow sweep and update
         if not na(confirmLow.price) and low < confirmLow.price and close > confirmLow.price and confirmLow.confirmed
             confirmLow.price := low
             confirmLow_line.set_y1(confirmLow.price)
@@ -169,6 +188,7 @@ else
         else if not na(confirmLow.price) and low < confirmLow.price and close > confirmLow.price and not confirmLow.confirmed
             confirmLow := pivot.new(low)
     else if swingTrend.bias == bias.BEARISH
+        // confirmHigh sweep and update
         if not na(confirmHigh.price) and high > confirmHigh.price and close < confirmHigh.price and confirmHigh.confirmed
             confirmHigh.price := high
             confirmHigh_line.set_y1(confirmHigh.price)
@@ -183,6 +203,7 @@ else
                 retracementStarted    := true
                 retracementStartLevel := na
                 lastHigh.confirmed    := true
+                lastHigh_line := line.new(x1=safeX1(lastHigh.barIndex), y1=lastHigh.price, x2=bar_index + highLowLineHorzOffset, y2=lastHigh.price, color=GRAY, width=highLowLineWidth)
             else if low < retracementStartLevel
                 retracementStartLevel := low
         else if swingTrend.bias == bias.BEARISH
@@ -190,6 +211,7 @@ else
                 retracementStarted    := true
                 retracementStartLevel := na
                 lastLow.confirmed     := true
+                lastLow_line := line.new(x1=safeX1(lastLow.barIndex), y1=lastLow.price, x2=bar_index + highLowLineHorzOffset, y2=lastLow.price, color=GRAY, width=highLowLineWidth)
             else if high > retracementStartLevel
                 retracementStartLevel := high
 
@@ -213,7 +235,8 @@ else
                 swingTrend.bias := bias.BEARISH
                 lastLow         := pivot.new(low)
                 confirmLow_line.delete()
-                confirmHigh_line := line.new(x1=safeX1(hhBar), y1=hh, x2=bar_index + highLowLineHorzOffset, y2=hh, color=BLUE, width=1)
+                lastHigh_line.delete()
+                confirmHigh_line := line.new(x1=safeX1(hhBar), y1=hh, x2=bar_index + highLowLineHorzOffset, y2=hh, color=BLUE, width=highLowLineWidth)
 
                 retracementStarted    := false
                 lastIndependentBearishBar := LastIndependentBearishBar.new(high)
@@ -249,7 +272,8 @@ else
                 confirmLow  := pivot.new(ll, true, llBar)
                 lastHigh    := pivot.new(high)
                 confirmLow_line.delete()
-                confirmLow_line := line.new(x1=safeX1(llBar), y1=ll, x2=bar_index + highLowLineHorzOffset, y2=ll, color=BLUE, width=1)
+                lastHigh_line.delete()
+                confirmLow_line := line.new(x1=safeX1(llBar), y1=ll, x2=bar_index + highLowLineHorzOffset, y2=ll, color=BLUE, width=highLowLineWidth)
 
                 retracementStarted    := false
                 lastIndependentBullishBar := LastIndependentBullishBar.new(low)
@@ -289,7 +313,8 @@ else
                 swingTrend.bias := bias.BULLISH
                 lastHigh        := pivot.new(high)
                 confirmHigh_line.delete()
-                confirmLow_line := line.new(x1=safeX1(llBar), y1=ll, x2=bar_index + highLowLineHorzOffset, y2=ll, color=BLUE, width=1)
+                lastLow_line.delete()
+                confirmLow_line := line.new(x1=safeX1(llBar), y1=ll, x2=bar_index + highLowLineHorzOffset, y2=ll, color=BLUE, width=highLowLineWidth)
 
                 retracementStarted    := false
                 lastIndependentBullishBar := LastIndependentBullishBar.new(low)
@@ -325,7 +350,8 @@ else
                 confirmHigh := pivot.new(hh, true, hhBar)
                 lastLow     := pivot.new(low)
                 confirmHigh_line.delete()
-                confirmHigh_line := line.new(x1=safeX1(hhBar), y1=hh, x2=bar_index + highLowLineHorzOffset, y2=hh, color=BLUE, width=1)
+                lastLow_line.delete()
+                confirmHigh_line := line.new(x1=safeX1(hhBar), y1=hh, x2=bar_index + highLowLineHorzOffset, y2=hh, color=BLUE, width=highLowLineWidth)
 
                 retracementStarted    := false
                 lastIndependentBearishBar := LastIndependentBearishBar.new(high)
