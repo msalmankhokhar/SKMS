@@ -1,0 +1,711 @@
+//@version=6
+
+indicator("SK Market Structure", "SKMS", overlay=true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
+
+// ─── Color scheme ────────────────────────────────────────────────
+GREEN = #089981
+RED   = #F23645
+BLUE  = #368ef2
+GRAY =  #808080
+LABEL_LINE_GAP = ta.atr(200) * 0.7
+LABEL_SIZE     = size.normal
+
+CONFIRM_LINE_COLOR = BLUE
+LAST_LINE_COLOR = GRAY
+HIGH_LOW_LINE_WIDTH = 1
+
+// ─── Inputs ──────────────────────────────────────────────────────
+showInternalStructure = input.bool(false, "Show Internal Structure")
+highLowLineWidth = input.int(HIGH_LOW_LINE_WIDTH, "High/Low Line Width", minval=1, maxval=5)
+showOBs = input.bool(false, "Show Order Blocks")
+bool showWorkedObs = false
+color bullishOBColor = na
+color bearishOBColor = na
+if showOBs
+    bullishOBColor := input.color(color.new(GREEN, 82), "Bullish OB Color")
+    bearishOBColor := input.color(color.new(RED, 82), "Bearish OB Color")
+    showWorkedObs := input.bool(false, "Show Mitigated Order Blocks")
+
+// ─── Types ───────────────────────────────────────────────────────
+enum bias
+    BULLISH
+    BEARISH
+
+enum ob_state
+    UNTAPPED
+    TAPPED
+    WORKED
+    FAILED
+
+type trend
+    bias bias
+
+type pivot
+    float price
+    confirmed = false
+    int barIndex = bar_index
+
+type LastIndependentBullishBar
+    float low
+    int barIndex = bar_index
+
+type LastIndependentBearishBar
+    float high
+    int barIndex = bar_index
+
+type OrderBlock
+    bias bias
+    int barIndex = bar_index
+    float obHigh
+    float obLow
+    int breakoutCandleBarIndex = na
+    float fvgEndPoint = na
+    ob_state ob_state = ob_state.UNTAPPED
+    failed = false
+    box box = na
+
+type CurrentSwingIB
+    int barIndex = bar_index
+    float ibHigh = high
+    float ibLow = low
+    float ibOpen = open
+    float ibClose = close
+
+
+// ─── safeX1: clamp bar index so line.new() never errors ──────────
+safeX1(int idx) =>
+    math.max(idx, bar_index - 4999)
+
+// ─── Lowest / Highest helpers ────────────────────────────────────
+getLowestLow(int fromIndex, int toIndex) =>
+    float lowestLow    = low
+    int   lowestBarIdx = bar_index
+    for i = 0 to (toIndex - fromIndex)
+        int idx = bar_index - i
+        if idx >= fromIndex
+            if low[i] < lowestLow
+                lowestLow    := low[i]
+                lowestBarIdx := idx
+    [lowestLow, lowestBarIdx]
+
+getHighestHigh(int fromIndex, int toIndex) =>
+    float highestHigh  = high
+    int   highestBarIdx = bar_index
+    for i = 0 to (toIndex - fromIndex)
+        int idx = bar_index - i
+        if idx >= fromIndex
+            if high[i] > highestHigh
+                highestHigh   := high[i]
+                highestBarIdx := idx
+    [highestHigh, highestBarIdx]
+
+// ════════════════════════════════════════════════════════════════
+//  EXTERNAL STRUCTURE STATE
+// ════════════════════════════════════════════════════════════════
+var bool  retracementStarted       = false
+var float retracementStartLevel    = na
+var LastIndependentBullishBar lastIndependentBullishBar = na
+var LastIndependentBearishBar lastIndependentBearishBar = na
+var pivot lastHigh                 = pivot.new(na, false, na)
+var pivot lastLow                  = pivot.new(na, false, na)
+var pivot confirmHigh              = pivot.new(na, false, na)
+var pivot confirmLow               = pivot.new(na, false, na)
+var line  lastLine                 = na
+var array<line> structureLines     = array.new<line>()
+var line  confirmLow_line          = na
+var line  lastHigh_line         = na
+var line  lastLow_line          = na
+var line  confirmHigh_line         = na
+var int   highLowLineHorzOffset    = 30
+var trend swingTrend               = trend.new(bias.BULLISH)
+
+// OB variables
+var array<OrderBlock> OBs     = array.new<OrderBlock>()
+var OrderBlock unConfirmedOb = na
+var bias obCurrentSwing = na
+var CurrentSwingIB currentSwingIB = na
+
+drawObBox(OrderBlock ob, includeFvg = false) =>
+    if not na(ob.box)
+        ob.box.delete()
+    color obColor = ob.bias == bias.BULLISH ? bullishOBColor : bearishOBColor
+
+    float top = na
+    float bottom = na
+
+    if ob.bias == bias.BULLISH
+        top := includeFvg and not na(ob.fvgEndPoint) ? ob.fvgEndPoint : ob.obHigh
+        bottom := ob.obLow
+    else if ob.bias == bias.BEARISH
+        top := ob.obHigh
+        bottom := includeFvg and not na(ob.fvgEndPoint) ? ob.fvgEndPoint : ob.obLow
+
+    ob.box := box.new(left=ob.barIndex, top=top, right=bar_index + highLowLineHorzOffset, bottom=bottom, border_color= obColor, bgcolor=obColor)
+
+// ════════════════════════════════════════════════════════════════
+//  INTERNAL STRUCTURE STATE
+// ════════════════════════════════════════════════════════════════
+var bool  iRetracementStarted      = false
+var float iRetracementStartLevel   = na
+var LastIndependentBullishBar iLastIndBullBar = na
+var LastIndependentBearishBar iLastIndBearBar = na
+var pivot iLastHigh                = pivot.new(na, false, na)
+var pivot iLastLow                 = pivot.new(na, false, na)
+var pivot iConfirmHigh             = pivot.new(na, false, na)
+var pivot iConfirmLow              = pivot.new(na, false, na)
+var trend iSwingTrend              = trend.new(bias.BULLISH)
+var bool  iActive                  = false   // internal structure is active
+var int   iStartBarIndex           = na      // bar index of external BOS/CHOCH candle
+// Last IB mode tracking
+var float iLastIBLevel             = na      // last IB price level (low for bull, high for bear)
+var int   iLastIBBar               = na      // last IB bar index
+var bias  iLastIBBias              = bias.BULLISH  // expected internal bias when IB breaks
+
+// ════════════════════════════════════════════════════════════════
+//  BOOTSTRAP (first bar)
+// ════════════════════════════════════════════════════════════════
+if barstate.isfirst
+    if close > open
+        swingTrend.bias := bias.BULLISH
+        lastHigh        := pivot.new(high)
+        confirmLow      := pivot.new(low, true)
+
+        obCurrentSwing := bias.BULLISH
+        currentSwingIB := CurrentSwingIB.new(bar_index, high, low)
+    else
+        swingTrend.bias := bias.BEARISH
+        lastLow         := pivot.new(low)
+        confirmHigh     := pivot.new(high, true)
+
+        obCurrentSwing := bias.BULLISH
+        currentSwingIB := CurrentSwingIB.new(bar_index, high, low)
+
+else
+
+    // tracking OBs
+
+    // cleaning order blocks
+
+    // marking order blocks as failed if price closes outside of them
+    if array.size(OBs) > 0
+        for i = 0 to array.size(OBs) - 1
+            OrderBlock ob = array.get(OBs, i)
+            if ob.bias == bias.BULLISH and close < ob.obLow
+                ob.ob_state := ob_state.FAILED
+            else if ob.bias == bias.BEARISH and close > ob.obHigh
+                ob.ob_state := ob_state.FAILED
+
+    // deleting failed Order Blocks
+    if array.size(OBs) > 0
+        for i = array.size(OBs) - 1 to 0
+            OrderBlock ob = array.get(OBs, i)
+            if ob.ob_state == ob_state.FAILED
+                if not na(ob.box)
+                    ob.box.delete()
+                array.remove(OBs, i)
+
+    // Mark OBs as tapped when price touches them
+    if array.size(OBs) > 0
+        for i = 0 to array.size(OBs) - 1
+            OrderBlock ob = array.get(OBs, i)
+            if ob.ob_state == ob_state.UNTAPPED
+                if ob.bias == bias.BULLISH and low <= ob.obHigh
+                    ob.ob_state := ob_state.TAPPED
+                else if ob.bias == bias.BEARISH and high >= ob.obLow
+                    ob.ob_state := ob_state.TAPPED
+
+    // Set OB box x2 when price bounces back after tapped
+    if array.size(OBs) > 0
+        for i = 0 to array.size(OBs) - 1
+            OrderBlock ob = array.get(OBs, i)
+            if ob.ob_state == ob_state.TAPPED and ob.ob_state != ob_state.FAILED
+                if ob.bias == bias.BULLISH and close > ob.obHigh
+                    if not na(ob.box)
+                        ob.box.set_right(bar_index)
+                        ob.ob_state := ob_state.WORKED
+                else if ob.bias == bias.BEARISH and close < ob.obLow
+                    if not na(ob.box)
+                        ob.box.set_right(bar_index)
+                        ob.ob_state := ob_state.WORKED
+
+    // deleting worked Order Blocks
+    if array.size(OBs) > 0
+        if showWorkedObs == false
+            for i = array.size(OBs) - 1 to 0
+                OrderBlock ob = array.get(OBs, i)
+                if ob.ob_state == ob_state.WORKED
+                    if not na(ob.box)
+                        ob.box.delete()
+                    array.remove(OBs, i)
+
+    // Update all active OBs x2 point to current bar
+    if array.size(OBs) > 0
+        for i = 0 to array.size(OBs) - 1
+            OrderBlock ob = array.get(OBs, i)
+            if not na(ob.box)
+                ob.box.set_right(bar_index + highLowLineHorzOffset)
+
+    if obCurrentSwing == bias.BULLISH
+        if not na(unConfirmedOb) and unConfirmedOb.bias == bias.BULLISH and bar_index[1] != unConfirmedOb.breakoutCandleBarIndex
+            // checking for FVG in unconfirmed OB
+            if low[1] - unConfirmedOb.obHigh > 0
+                OrderBlock newOb = unConfirmedOb
+                newOb.fvgEndPoint := low[1]
+                drawObBox(newOb)
+                OBs.push(newOb)
+                unConfirmedOb := na
+            else
+                unConfirmedOb := na
+
+        if close > currentSwingIB.ibHigh // newlatest IB formed in Swing
+            currentSwingIB := CurrentSwingIB.new(bar_index, high, low)
+        else if close < currentSwingIB.ibHigh and close > currentSwingIB.ibLow // current candle closed in previous
+            if high > currentSwingIB.ibHigh
+                currentSwingIB.ibHigh := high
+            if low < currentSwingIB.ibLow
+                currentSwingIB.ibLow := low
+        else if close < currentSwingIB.ibLow // swing reversed and unconfirmed OB formed
+            unConfirmedOb := OrderBlock.new(bias.BEARISH, currentSwingIB.barIndex, currentSwingIB.ibHigh, currentSwingIB.ibLow, bar_index)
+            obCurrentSwing := bias.BEARISH
+            currentSwingIB := CurrentSwingIB.new(bar_index, high, low)
+            
+    else if obCurrentSwing == bias.BEARISH
+        if not na(unConfirmedOb) and unConfirmedOb.bias == bias.BEARISH and bar_index[1] != unConfirmedOb.breakoutCandleBarIndex
+            // checking for FVG in unconfirmed OB
+            if unConfirmedOb.obLow - high[1] > 0
+                OrderBlock newOb = unConfirmedOb
+                newOb.fvgEndPoint := high[1]
+                drawObBox(newOb)
+                OBs.push(newOb)
+                unConfirmedOb := na
+            else
+                unConfirmedOb := na
+
+        if close < currentSwingIB.ibLow // new latest IB formed in Swing
+            currentSwingIB := CurrentSwingIB.new(bar_index, high, low)
+        else if close < currentSwingIB.ibHigh and close > currentSwingIB.ibLow // current candle closed in previous
+            if high > currentSwingIB.ibHigh
+                currentSwingIB.ibHigh := high
+            if low < currentSwingIB.ibLow
+                currentSwingIB.ibLow := low
+        else if close > currentSwingIB.ibHigh // swing reversed and unconfirmed OB formed
+            unConfirmedOb := OrderBlock.new(bias.BULLISH, currentSwingIB.barIndex, currentSwingIB.ibHigh, currentSwingIB.ibLow, bar_index)
+            obCurrentSwing := bias.BULLISH
+            currentSwingIB := CurrentSwingIB.new(bar_index, high, low)
+                
+
+    // ── Update confirm line x2 ──────────────────────────────────
+    if not na(confirmLow_line)
+        confirmLow_line.set_x2(bar_index + highLowLineHorzOffset)
+    if not na(confirmHigh_line)
+        confirmHigh_line.set_x2(bar_index + highLowLineHorzOffset)
+    if not na(lastHigh_line)
+        lastHigh_line.set_x2(bar_index + highLowLineHorzOffset)
+    if not na(lastLow_line)
+        lastLow_line.set_x2(bar_index + highLowLineHorzOffset)
+
+    previousBarClose = close[1]
+
+    // ════════════════════════════════════════════════════════════
+    //  EXTERNAL: update last high / last low
+    // ════════════════════════════════════════════════════════════
+    if swingTrend.bias == bias.BULLISH
+        if close > lastHigh.price and not lastHigh.confirmed
+            lastHigh := pivot.new(high)
+            if not (open != previousBarClose)
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+            else
+                lastIndependentBullishBar := LastIndependentBullishBar.new(previousBarClose)
+
+            retracementStartLevel := lastIndependentBullishBar.low
+            retracementStarted    := false
+            
+            // update choch point for internal structure
+            iConfirmLow := pivot.new(lastIndependentBullishBar.low, true, lastIndependentBullishBar.barIndex)
+            
+        // lastHigh sweep and update
+        else if high > lastHigh.price and close < lastHigh.price and lastHigh.confirmed
+            lastHigh.price := high
+            lastHigh_line.set_y1(lastHigh.price)
+            lastHigh_line.set_y2(lastHigh.price)
+        else if high > lastHigh.price and close < lastHigh.price and not lastHigh.confirmed
+            lastHigh := pivot.new(high)
+    else if swingTrend.bias == bias.BEARISH
+        if close < lastLow.price and not lastLow.confirmed
+            lastLow := pivot.new(low)
+            if not (open != previousBarClose)
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+            else
+                lastIndependentBearishBar := LastIndependentBearishBar.new(previousBarClose)
+            retracementStartLevel := lastIndependentBearishBar.high
+            retracementStarted    := false
+            
+            // update choch point for internal structure
+            iConfirmHigh := pivot.new(lastIndependentBearishBar.high, true, lastIndependentBearishBar.barIndex)
+
+        // lastLow sweep and update
+        else if low < lastLow.price and close > lastLow.price and lastLow.confirmed
+            lastLow.price := low
+            lastLow_line.set_y1(lastLow.price)
+            lastLow_line.set_y2(lastLow.price)
+        else if low < lastLow.price and close > lastLow.price and not lastLow.confirmed
+            lastLow := pivot.new(low)
+
+    // ── EXTERNAL: update confirm high / confirm low ─────────────
+    if swingTrend.bias == bias.BULLISH
+        // confirmLow sweep and update
+        if not na(confirmLow.price) and low < confirmLow.price and close > confirmLow.price and confirmLow.confirmed
+            confirmLow.price := low
+            confirmLow_line.set_y1(confirmLow.price)
+            confirmLow_line.set_y2(confirmLow.price)
+        else if not na(confirmLow.price) and low < confirmLow.price and close > confirmLow.price and not confirmLow.confirmed
+            confirmLow := pivot.new(low)
+    else if swingTrend.bias == bias.BEARISH
+        // confirmHigh sweep and update
+        if not na(confirmHigh.price) and high > confirmHigh.price and close < confirmHigh.price and confirmHigh.confirmed
+            confirmHigh.price := high
+            confirmHigh_line.set_y1(confirmHigh.price)
+            confirmHigh_line.set_y2(confirmHigh.price)
+        else if not na(confirmHigh.price) and high > confirmHigh.price and close < confirmHigh.price and not confirmHigh.confirmed
+            confirmHigh := pivot.new(high)
+
+    // ── EXTERNAL: retracement start check ──────────────────────
+    if not retracementStarted and not na(retracementStartLevel)
+        if swingTrend.bias == bias.BULLISH
+            if close < retracementStartLevel
+                retracementStarted    := true
+                retracementStartLevel := na
+                lastHigh.confirmed    := true
+                lastHigh_line := line.new(x1=safeX1(lastHigh.barIndex), y1=lastHigh.price, x2=bar_index + highLowLineHorzOffset, y2=lastHigh.price, color=GRAY, width=highLowLineWidth)
+            else if low < retracementStartLevel
+                retracementStartLevel := low
+        else if swingTrend.bias == bias.BEARISH
+            if close > retracementStartLevel
+                retracementStarted    := true
+                retracementStartLevel := na
+                lastLow.confirmed     := true
+                lastLow_line := line.new(x1=safeX1(lastLow.barIndex), y1=lastLow.price, x2=bar_index + highLowLineHorzOffset, y2=lastLow.price, color=GRAY, width=highLowLineWidth)
+            else if high > retracementStartLevel
+                retracementStartLevel := high
+
+    // ════════════════════════════════════════════════════════════
+    //  EXTERNAL: BOS / CHOCH detection
+    // ════════════════════════════════════════════════════════════
+    if retracementStarted
+        if swingTrend.bias == bias.BULLISH
+
+            // Bearish CHOCH
+            if not na(confirmLow.price) and close < confirmLow.price and confirmLow.confirmed
+                _line = line.new(x1=safeX1(confirmLow.barIndex), y1=confirmLow.price, x2=bar_index, y2=confirmLow.price, color=RED, width=1)
+                structureLines.push(_line)
+                int mid = math.round((bar_index + confirmLow.barIndex) / 2)
+                label.new(mid, confirmLow.price - LABEL_LINE_GAP, "CHOCH", style=label.style_label_center, textcolor=RED, color=color.new(color.white, 100), size=LABEL_SIZE)
+
+                int fromIdx = confirmLow.barIndex
+                [hh, hhBar] = getHighestHigh(fromIdx, bar_index)
+                confirmHigh := pivot.new(hh, true, hhBar)
+
+                swingTrend.bias := bias.BEARISH
+                lastLow         := pivot.new(low)
+                confirmLow_line.delete()
+                lastHigh_line.delete()
+                confirmHigh_line := line.new(x1=safeX1(hhBar), y1=hh, x2=bar_index + highLowLineHorzOffset, y2=hh, color=BLUE, width=highLowLineWidth)
+
+                retracementStarted    := false
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+                retracementStartLevel := lastIndependentBearishBar.high
+
+                // ── Reset internal: BEARISH bias, breakout candle = current bar ──
+                iActive                := true
+                iStartBarIndex         := bar_index
+                iRetracementStarted    := false
+                iRetracementStartLevel := na
+                iLastIndBullBar        := na
+                iLastIndBearBar        := na
+                iSwingTrend.bias       := bias.BEARISH
+                iLastLow               := pivot.new(low,  false, bar_index)
+                iConfirmHigh           := pivot.new(high, true,  bar_index)
+                iLastHigh              := pivot.new(na, false, na)
+                iConfirmLow            := pivot.new(na, false, na)
+
+            // Bullish BOS
+            else if not na(lastHigh.price) and close > lastHigh.price and lastHigh.confirmed
+                _line = line.new(x1=safeX1(lastHigh.barIndex), y1=lastHigh.price, x2=bar_index, y2=lastHigh.price, color=GREEN, width=1)
+                structureLines.push(_line)
+                int mid = math.round((bar_index + lastHigh.barIndex) / 2)
+                label.new(mid, lastHigh.price + LABEL_LINE_GAP, "BOS", style=label.style_label_center, textcolor=GREEN, color=color.new(color.white, 100), size=LABEL_SIZE)
+
+                int fromIdx = lastHigh.barIndex
+                [ll, llBar] = getLowestLow(fromIdx, bar_index)
+                confirmLow  := pivot.new(ll, true, llBar)
+                lastHigh    := pivot.new(high)
+                confirmLow_line.delete()
+                lastHigh_line.delete()
+                confirmLow_line := line.new(x1=safeX1(llBar), y1=ll, x2=bar_index + highLowLineHorzOffset, y2=ll, color=BLUE, width=highLowLineWidth)
+
+                retracementStarted    := false
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+                retracementStartLevel := lastIndependentBullishBar.low
+
+                // ── Reset internal: BULLISH bias ──
+                iActive                := true
+                iStartBarIndex         := bar_index
+                iRetracementStarted    := false
+                iRetracementStartLevel := na
+                iLastIndBullBar        := na
+                iLastIndBearBar        := na
+                iSwingTrend.bias       := bias.BULLISH
+                iLastHigh              := pivot.new(high, false, bar_index)
+                iConfirmLow            := pivot.new(low,  true,  bar_index)
+                iLastLow               := pivot.new(na, false, na)
+                iConfirmHigh           := pivot.new(na, false, na)
+
+        else if swingTrend.bias == bias.BEARISH
+
+            // Bullish CHOCH
+            if not na(confirmHigh.price) and close > confirmHigh.price and confirmHigh.confirmed
+                _line = line.new(x1=safeX1(confirmHigh.barIndex), y1=confirmHigh.price, x2=bar_index, y2=confirmHigh.price, color=GREEN, width=1)
+                structureLines.push(_line)
+                int mid = math.round((bar_index + confirmHigh.barIndex) / 2)
+                label.new(mid, confirmHigh.price + LABEL_LINE_GAP, "CHOCH", style=label.style_label_center, textcolor=GREEN, color=color.new(color.white, 100), size=LABEL_SIZE)
+
+                int fromIdx = confirmHigh.barIndex
+                [ll, llBar] = getLowestLow(fromIdx, bar_index)
+                confirmLow  := pivot.new(ll, true, llBar)
+
+                swingTrend.bias := bias.BULLISH
+                lastHigh        := pivot.new(high)
+                confirmHigh_line.delete()
+                lastLow_line.delete()
+                confirmLow_line := line.new(x1=safeX1(llBar), y1=ll, x2=bar_index + highLowLineHorzOffset, y2=ll, color=BLUE, width=highLowLineWidth)
+
+                retracementStarted    := false
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+                retracementStartLevel := lastIndependentBullishBar.low
+
+                // ── Reset internal: BULLISH bias ──
+                iActive                := true
+                iStartBarIndex         := bar_index
+                iRetracementStarted    := false
+                iRetracementStartLevel := na
+                iLastIndBullBar        := na
+                iLastIndBearBar        := na
+                iSwingTrend.bias       := bias.BULLISH
+                iLastHigh              := pivot.new(high, false, bar_index)
+                iConfirmLow            := pivot.new(low,  true,  bar_index)
+                iLastLow               := pivot.new(na, false, na)
+                iConfirmHigh           := pivot.new(na, false, na)
+
+            // Bearish BOS
+            else if not na(lastLow.price) and close < lastLow.price and lastLow.confirmed
+                _line = line.new(x1=safeX1(lastLow.barIndex), y1=lastLow.price, x2=bar_index, y2=lastLow.price, color=RED, width=1)
+                structureLines.push(_line)
+                int mid = math.round((bar_index + lastLow.barIndex) / 2)
+                label.new(mid, lastLow.price - LABEL_LINE_GAP, "BOS", style=label.style_label_center, textcolor=RED, color=color.new(color.white, 100), size=LABEL_SIZE)
+
+                int fromIdx = lastLow.barIndex
+                [hh, hhBar] = getHighestHigh(fromIdx, bar_index)
+                confirmHigh := pivot.new(hh, true, hhBar)
+                lastLow     := pivot.new(low)
+                confirmHigh_line.delete()
+                lastLow_line.delete()
+                confirmHigh_line := line.new(x1=safeX1(hhBar), y1=hh, x2=bar_index + highLowLineHorzOffset, y2=hh, color=BLUE, width=highLowLineWidth)
+
+                retracementStarted    := false
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+                retracementStartLevel := lastIndependentBearishBar.high
+
+                // ── Reset internal: BEARISH bias ──
+                iActive                := true
+                iStartBarIndex         := bar_index
+                iRetracementStarted    := false
+                iRetracementStartLevel := na
+                iLastIndBullBar        := na
+                iLastIndBearBar        := na
+                iSwingTrend.bias       := bias.BEARISH
+                iLastLow               := pivot.new(low,  false, bar_index)
+                iConfirmHigh           := pivot.new(high, true,  bar_index)
+                iLastHigh              := pivot.new(na, false, na)
+                iConfirmLow            := pivot.new(na, false, na)
+
+    else
+        if swingTrend.bias == bias.BULLISH
+            if close < confirmLow.price
+                swingTrend.bias       := bias.BEARISH
+                confirmHigh           := lastHigh
+                confirmHigh.confirmed := true
+                lastLow               := confirmLow
+                confirmLow            := pivot.new(na, false, na)
+                lastHigh              := pivot.new(na, false, na)
+                lastIndependentBullishBar := LastIndependentBullishBar.new(low)
+                retracementStartLevel := lastIndependentBullishBar.low
+                retracementStarted    := false
+        else if swingTrend.bias == bias.BEARISH
+            if close > confirmHigh.price
+                swingTrend.bias      := bias.BULLISH
+                confirmLow           := lastLow
+                confirmLow.confirmed := true
+                lastHigh             := confirmHigh
+                confirmHigh          := pivot.new(na, false, na)
+                lastLow              := pivot.new(na, false, na)
+                lastIndependentBearishBar := LastIndependentBearishBar.new(high)
+                retracementStartLevel := lastIndependentBearishBar.high
+                retracementStarted    := false
+
+    // ════════════════════════════════════════════════════════════
+    //  INTERNAL STRUCTURE PROCESSING
+    // ════════════════════════════════════════════════════════════
+    if iActive and showInternalStructure
+
+            
+        iPrevClose = close[1]
+
+            // ── Internal: update last high / last low ───────────────
+        if iSwingTrend.bias == bias.BULLISH
+            if close > iLastHigh.price and not iLastHigh.confirmed
+                iLastHigh := pivot.new(high)
+                if not (open != iPrevClose)
+                    iLastIndBullBar := LastIndependentBullishBar.new(low)
+                else
+                    iLastIndBullBar := LastIndependentBullishBar.new(iPrevClose)
+                iRetracementStartLevel := iLastIndBullBar.low
+                iRetracementStarted    := false
+            else if high > iLastHigh.price and close < iLastHigh.price and iLastHigh.confirmed
+                iLastHigh.price := high
+            else if high > iLastHigh.price and close < iLastHigh.price and not iLastHigh.confirmed
+                iLastHigh := pivot.new(high)
+        else if iSwingTrend.bias == bias.BEARISH
+            if close < iLastLow.price and not iLastLow.confirmed
+                iLastLow := pivot.new(low)
+                if not (open != iPrevClose)
+                    iLastIndBearBar := LastIndependentBearishBar.new(high)
+                else
+                    iLastIndBearBar := LastIndependentBearishBar.new(iPrevClose)
+                iRetracementStartLevel := iLastIndBearBar.high
+                iRetracementStarted    := false
+            else if low < iLastLow.price and close > iLastLow.price and iLastLow.confirmed
+                iLastLow.price := low
+            else if low < iLastLow.price and close > iLastLow.price and not iLastLow.confirmed
+                iLastLow := pivot.new(low)
+
+        // ── Internal: update confirm high / confirm low ─────────
+        if iSwingTrend.bias == bias.BULLISH
+            if not na(iConfirmLow.price) and low < iConfirmLow.price and close > iConfirmLow.price and iConfirmLow.confirmed
+                iConfirmLow.price := low
+            else if not na(iConfirmLow.price) and low < iConfirmLow.price and close > iConfirmLow.price and not iConfirmLow.confirmed
+                iConfirmLow := pivot.new(low)
+        else if iSwingTrend.bias == bias.BEARISH
+            if not na(iConfirmHigh.price) and high > iConfirmHigh.price and close < iConfirmHigh.price and iConfirmHigh.confirmed
+                iConfirmHigh.price := high
+            else if not na(iConfirmHigh.price) and high > iConfirmHigh.price and close < iConfirmHigh.price and not iConfirmHigh.confirmed
+                iConfirmHigh := pivot.new(high)
+
+        // ── Internal: retracement start check ──────────────────
+        if not iRetracementStarted and not na(iRetracementStartLevel)
+            if iSwingTrend.bias == bias.BULLISH
+                if close < iRetracementStartLevel
+                    iRetracementStarted    := true
+                    iRetracementStartLevel := na
+                    iLastHigh.confirmed    := true
+                else if low < iRetracementStartLevel
+                    iRetracementStartLevel := low
+            else if iSwingTrend.bias == bias.BEARISH
+                if close > iRetracementStartLevel
+                    iRetracementStarted    := true
+                    iRetracementStartLevel := na
+                    iLastLow.confirmed     := true
+                else if high > iRetracementStartLevel
+                    iRetracementStartLevel := high
+
+        // ── Internal: BOS / CHOCH detection (lines only, no labels) ──
+        if iRetracementStarted
+            if iSwingTrend.bias == bias.BULLISH
+
+                // Internal Bearish CHOCH
+                if not na(iConfirmLow.price) and close < iConfirmLow.price and iConfirmLow.confirmed
+                    line.new(x1=safeX1(iConfirmLow.barIndex), y1=iConfirmLow.price, x2=bar_index, y2=iConfirmLow.price, color=RED, width=1)
+
+                    int fromIdx = iConfirmLow.barIndex
+                    [hh, hhBar] = getHighestHigh(fromIdx, bar_index)
+                    iConfirmHigh := pivot.new(hh, true, hhBar)
+
+                    iSwingTrend.bias      := bias.BEARISH
+                    iLastLow              := pivot.new(low)
+                    iRetracementStarted   := false
+                    iLastIndBearBar       := LastIndependentBearishBar.new(high)
+                    iRetracementStartLevel := iLastIndBearBar.high
+
+                // Internal Bullish BOS
+                else if not na(iLastHigh.price) and close > iLastHigh.price and iLastHigh.confirmed
+                    line.new(x1=safeX1(iLastHigh.barIndex), y1=iLastHigh.price, x2=bar_index, y2=iLastHigh.price, color=GREEN, width=1)
+
+                    int fromIdx = iLastHigh.barIndex
+                    [ll, llBar] = getLowestLow(fromIdx, bar_index)
+                    iConfirmLow  := pivot.new(ll, true, llBar)
+                    iLastHigh    := pivot.new(high)
+                    iRetracementStarted   := false
+                    iLastIndBullBar       := LastIndependentBullishBar.new(low)
+                    iRetracementStartLevel := iLastIndBullBar.low
+
+            else if iSwingTrend.bias == bias.BEARISH
+
+                // Internal Bullish CHOCH
+                if not na(iConfirmHigh.price) and close > iConfirmHigh.price and iConfirmHigh.confirmed
+                    line.new(x1=safeX1(iConfirmHigh.barIndex), y1=iConfirmHigh.price, x2=bar_index, y2=iConfirmHigh.price, color=GREEN, width=1)
+
+                    int fromIdx = iConfirmHigh.barIndex
+                    [ll, llBar] = getLowestLow(fromIdx, bar_index)
+                    iConfirmLow  := pivot.new(ll, true, llBar)
+
+                    iSwingTrend.bias      := bias.BULLISH
+                    iLastHigh             := pivot.new(high)
+                    iRetracementStarted   := false
+                    iLastIndBullBar       := LastIndependentBullishBar.new(low)
+                    iRetracementStartLevel := iLastIndBullBar.low
+
+                // Internal Bearish BOS
+                else if not na(iLastLow.price) and close < iLastLow.price and iLastLow.confirmed
+                    line.new(x1=safeX1(iLastLow.barIndex), y1=iLastLow.price, x2=bar_index, y2=iLastLow.price, color=RED, width=1)
+
+                    int fromIdx = iLastLow.barIndex
+                    [hh, hhBar] = getHighestHigh(fromIdx, bar_index)
+                    iConfirmHigh := pivot.new(hh, true, hhBar)
+                    iLastLow     := pivot.new(low)
+                    iRetracementStarted   := false
+                    iLastIndBearBar       := LastIndependentBearishBar.new(high)
+                    iRetracementStartLevel := iLastIndBearBar.high
+
+        else
+            if iSwingTrend.bias == bias.BULLISH
+                if not na(iConfirmLow.price) and close < iConfirmLow.price
+                    iSwingTrend.bias      := bias.BEARISH
+                    iConfirmHigh          := iLastHigh
+                    iConfirmHigh.confirmed := true
+                    iLastLow              := iConfirmLow
+                    iConfirmLow           := pivot.new(na, false, na)
+                    iLastHigh             := pivot.new(na, false, na)
+                    iLastIndBullBar       := LastIndependentBullishBar.new(low)
+                    iRetracementStartLevel := iLastIndBullBar.low
+                    iRetracementStarted   := false
+            else if iSwingTrend.bias == bias.BEARISH
+                if not na(iConfirmHigh.price) and close > iConfirmHigh.price
+                    iSwingTrend.bias      := bias.BULLISH
+                    iConfirmLow           := iLastLow
+                    iConfirmLow.confirmed := true
+                    iLastHigh             := iConfirmHigh
+                    iConfirmHigh          := pivot.new(na, false, na)
+                    iLastLow              := pivot.new(na, false, na)
+                    iLastIndBearBar       := LastIndependentBearishBar.new(high)
+                    iRetracementStartLevel := iLastIndBearBar.high
+                    iRetracementStarted   := false
+
+
+
+// isBullishSwingIb = currentSwingIB.ibClose > currentSwingIB.ibOpen
+// isBearishSwingIb = currentSwingIB.ibClose < currentSwingIB.ibOpen
+
+// currentSwingIBClosePlotPoint = isBullishSwingIb ? currentSwingIB.ibHigh : isBearishSwingIb ? currentSwingIB.ibLow : currentSwingIB.ibClose
+
+// plot(
+//     currentSwingIBClosePlotPoint, color= color.new(color.orange, 0), linewidth=1, title="Current Swing IB Close"
+// )
